@@ -45,174 +45,121 @@ class GlobalAVGPooling2d(Module):
         width_pool = height_pool.mean(dim=-1)
         return self._activation_(width_pool)
 
-
-class PoseNet(Module):
-
-    def __init__(
-        self,
-        in_channels: int,
-        hiden_channels: int,
-        kernel_size: Union[Tuple[int, int], int]=(3, 3),
-        padding: int=1,
-        stride: Union[Tuple[int, int], int]=1,
-        activation: str = "relu",
-        dp_rate: float = 0.0,
-        normalize_conv: bool = False,
-        normalize_linear: bool = False,
-        embedding_dim: int = 32,
-        device: str="cpu"
-    ) -> None:
-
-        super().__init__()
-        self.embedding_dim = embedding_dim
-        self.device = device
-        
-        self._conv_ = [
-            Conv2d(
-                in_channels=in_channels,
-                out_channels=hiden_channels,
-                kernel_size=kernel_size,
-                padding=padding,
-                stride=stride
-            ),
-            _activations_[activation]()
-        ]
-        if normalize_conv:
-            self._conv_ += [BatchNorm2d(num_features=hiden_channels)]
-        
-        self._conv_ = ModuleList(self._conv_)
-        for layer in self._conv_:
-            if isinstance(layer, (Linear, Conv2d)):
-                th.nn.init.normal_(layer.weight, mean=0.0, std=1.0)
-
-        self._linear_ = [
-            Linear(self.embedding_dim, 6),
-            Dropout(p=dp_rate)
-        ]
-        if normalize_linear:
-            self._linear_ += [LayerNorm(num_features=6)]
-        
-        self._linear_ = Sequential(*self._linear_)
-    
-
-    def __call__(self, inputs: th.Tensor) -> th.Tensor:
-
-        x = inputs
-        for layer in self._conv_:
-            x = layer(x)
-
-        x = th.flatten(x, start_dim=1, end_dim=-1)
-        embedding_weights = th.normal(0.0, 1.0, (x.size()[1], self.embedding_dim)).to(self.device)
-        embedding = F.linear(x, weight=embedding_weights.T)
-        
-        twist = self._linear_(embedding)
-        gamma = twist[:, :3]
-        t = twist[:, 3:]
-        
-        theta = th.norm(gamma, keepdim=True, dim=-1)
-        gamma = gamma / (theta + 1e-5)
-        theta = theta.view(theta.size()[0], 1, 1)
-
-        cross_matrix = th.zeros((inputs.size()[0], 3, 3)).to(self.device)
-        cross_matrix[..., 0, 1] = -gamma[:, -1]
-        cross_matrix[..., 0, 2] = gamma[:, 1]
-        cross_matrix[..., 1, 0] = gamma[:, -1]
-        cross_matrix[..., 1, -1] = -gamma[:, 0]
-        cross_matrix[..., 2, 0] = -gamma[:, 1]
-        cross_matrix[..., 2, 1] = gamma[:, 0]
-
-        rotation = th.zeros((inputs.size()[0], 3, 3)).to(self.device)
-        rotation[:, :, :] = th.eye(3).to(self.device) + (th.sin(theta) * cross_matrix) + ((1 - th.cos(theta)) * (cross_matrix @ cross_matrix))
-
-        radriges_rotation = th.zeros((inputs.size()[0], 3, 3)).to(self.device)
-        radriges_rotation = th.eye(3).to(self.device) + (((1 - th.cos(theta)) / ((theta ** 2) + 1e-5)) * cross_matrix) + (((theta - th.sin(theta)) / ((theta ** 3) + 1e-5)) * (cross_matrix @ cross_matrix))
-
-
-        t_rotated = t.view(t.size()[0], 1, 3) @ radriges_rotation
-        t_rotated = t_rotated.permute(0, 2, 1)
-        
-        T = th.zeros((inputs.size()[0], 4, 4)).to(self.device)
-
-        T[:, :3, :3] = rotation
-        T[:, :3, 3:] = t_rotated
-        
-        return T
-
 class STNet(Module):
 
     def __init__(
         self, 
-        grid_size: Tuple[int, int], 
-        device: str="cpu"
+        grid_size: Tuple[int, int],
+        camera_matrix: Union[list, th.Tensor], 
+        device: str="cpu",
     ) -> None:
 
         super().__init__()
-        self.grid_size = grid_size
+        self.w, self.h = grid_size
         self.device = device
+        self.K = camera_matrix
+        if isinstance(camera_matrix, list):
+            self.K = th.Tensor(camera_matrix)
+
+        self.K_inv = th.linalg.inv(self.K)
+
+        self._grid_ = th.stack(th.meshgrid(
+            th.arange(self.h),
+            th.arange(self.w),
+            indexing="xy"
+        ), dim=-1)
+
     
     def __call__(
-        self, 
-        img: th.Tensor, 
-        kamera_matrix: th.Tensor, 
+        self,
+        depth_map: th.Tensor,
         transforms: th.Tensor,
-        depth_map: th.Tensor
+        image: th.Tensor
     ) -> th.Tensor:
         
-        tmp_ones = th.ones((img.size[0], img.size[2], img.size[3], 1)).to(self.device)
-        if len(depth_map) < 4:
-            depth_map = depth_map.unsqueeze(dim=-1)
-            
-        u, v = th.meshgrid(
-            th.arange(img.size()[2]),
-            th.arange(img.size()[3])
-        ).to(self.device)
+        homo_uv = th.cat([
+            self._grid_,
+            th.ones((
+                self._grid_.size()[0],
+                self._grid_.size()[1],
+                1
+            ))
+        ], dim=-1).unsqueeze(dim=0)
+        homo_uv = homo_uv.repeat(depth_map.size()[0], 1, 1, 1)
 
-        pix = th.stack([u, v], dim=1).repeat(img.size()[0], 1, 1, 1)
-        pix = th.cat([pix, tmp_ones], dim=-1)
-        depthed_pix = depth_map * pix
-
-        pix_3dK = depthed_pix[...] @ th.linalg.inv(kamera_matrix)
-        pix_3dK = th.cat([pix, tmp_ones], dim=-1)
+        ppoint_inv =  depth_map * (homo_uv @ self.K_inv.view(1, 3, 3))
+        homo_3d = th.cat([
+            ppoint_inv,
+            th.ones((
+                ppoint_inv.size()[0],
+                self._grid_.size()[0],
+                self._grid_.size()[1],
+                1
+            ))
+        ], dim=-1)
         
-        pix_3dTranspose = transforms @ pix_3dK
-        pix_3dTranspose = pix_3dTranspose[..., :-1]
-        pix_3dTranspose = pix_3dTranspose @ kamera_matrix
+        tr_points = (homo_3d[..., :] @ transforms.view(
+            transforms.size()[0],
+            1, 4, 4
+        ))[..., :-1]
+        ppoint_dir = tr_points[..., :] @ self.K.view(1, 3, 3) 
+        uv_grid = ppoint_dir[..., :-1] / (ppoint_dir[..., -1].unsqueeze(dim=-1) + 1e-4)
+        uv_grid = ((2 * (uv_grid / uv_grid.max())) - 1)
 
-        pix_3d2d = pix_3dTranspose[..., :-1] / pix_3dTranspose[..., -1]
-        
-        
-        
-        
+        if image is not None:
+            return F.grid_sample(
+                image,
+                grid=uv_grid,
+                mode="bilinear",
+            )
 
+        else:
+            return uv_grid
 
-        
-
-
-        
-        
-
-        
-
-        
         
 
-
-
+import matplotlib.pyplot as plt
+plt.style.use("dark_background")
+from torchvision.io import read_image
+from torchvision.transforms import Resize
 
 if __name__ == "__main__":
 
-    test = th.normal(0.0, 1.1, (10, 3, 128, 128))
-    stn = PoseNet(
-        in_channels=3,
-        hiden_channels=3,
-        dp_rate=0.45
+
+    res = Resize((128, 128))
+    path = "C:\\Users\\1\\Desktop\\PythonProjects\\SlamVODeepML\\test\\JellFish.jpeg"
+    image = read_image(path)
+    image = res(image)
+    image = (image / 255.0).to(th.float32).unsqueeze(dim=0)
+
+    grid_size = (128, 128)
+    camera_matrix = th.Tensor([
+        [100,   0, 63.5],
+        [  0, 100, 63.5],
+        [  0,   0,    1]
+    ])
+    layer = STNet(
+        grid_size=grid_size,
+        camera_matrix=camera_matrix
     )
-    out = stn(test).mean()
-    out.backward()
-    # linear = Linear(3, 128)
-    # GAP = GlobalAVGPooling2d()
+    pose_layer = PoseNet(
+        in_channels=3,
+        hiden_channels=32,
+    )
+    T = pose_layer(image)
+    print(T[0])
+    depth = th.normal(0, 1, (1, 128, 128, 1))
     
-    # out = linear(GAP(test)).mean()
-    # print(out.size())
-    # out.backward()
-    # print(out.grad_fn)
+    warped_image = layer(
+        depth_map=depth, 
+        transforms=T,
+        image=image
+    ).squeeze(dim=0).permute(1, 2, 0)
+    print(th.isnan(warped_image).any())
+    
+
+    _, axis = plt.subplots(ncols=2)
+    axis[0].imshow(image.squeeze(dim=0).permute(1, 2, 0))
+    axis[1].imshow(warped_image.detach())
+    plt.show()
+    print(warped_image.size())

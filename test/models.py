@@ -29,7 +29,9 @@ from torch.nn import (
 )
 
 from layers import *
-from utils import *
+from test.functions import *
+from collections import namedtuple
+from typing import NamedTuple
 
 _activations_ = {
     "relu": ReLU,
@@ -37,6 +39,104 @@ _activations_ = {
     "sigmoid": Sigmoid,
     "tanh": Tanh
 }
+
+
+class PoseNet(Module):
+
+    def __init__(
+        self,
+        in_channels: int,
+        hiden_channels: int,
+        kernel_size: Union[Tuple[int, int], int]=(3, 3),
+        padding: int=1,
+        stride: Union[Tuple[int, int], int]=1,
+        activation: str = "relu",
+        dp_rate: float = 0.0,
+        normalize_conv: bool = False,
+        normalize_linear: bool = False,
+        embedding_dim: int = 32,
+        device: str="cpu",
+        twist_out: bool=False
+    ) -> None:
+
+        super().__init__()
+        self.twist = twist_out
+        self.embedding_dim = embedding_dim
+        self.device = device
+    
+        self._conv_ = [
+            Conv2d(
+                in_channels=in_channels,
+                out_channels=hiden_channels,
+                kernel_size=kernel_size,
+                padding=padding,
+                stride=stride
+            ),
+            _activations_[activation]()
+        ]
+        if normalize_conv:
+            self._conv_ += [BatchNorm2d(num_features=hiden_channels)]
+        
+        self._conv_ = ModuleList(self._conv_)
+        for layer in self._conv_:
+            if isinstance(layer, (Linear, Conv2d)):
+                th.nn.init.normal_(layer.weight, mean=0.0, std=1.0)
+
+        self._linear_ = [
+            Linear(self.embedding_dim, 6),
+            Dropout(p=dp_rate)
+        ]
+        if normalize_linear:
+            self._linear_ += [LayerNorm(num_features=6)]
+        
+        self._linear_ = Sequential(*self._linear_)
+    
+
+    def __call__(self, inputs: th.Tensor) -> th.Tensor:
+
+        x = inputs
+        for layer in self._conv_:
+            x = layer(x)
+
+        x = th.flatten(x, start_dim=1, end_dim=-1)
+        embedding_weights = th.normal(0.0, 1.0, (x.size()[1], self.embedding_dim)).to(self.device)
+        embedding = F.linear(x, weight=embedding_weights.T)
+        
+        twist = self._linear_(embedding)
+        gamma = twist[:, :3]
+        t = twist[:, 3:]
+        
+        print(t.size(), gamma.size())
+        theta = th.norm(gamma, keepdim=True, dim=-1)
+        gamma = gamma / (theta + 1e-5)
+        theta = theta.view(theta.size()[0], 1, 1)
+
+        cross_matrix = th.zeros((inputs.size()[0], 3, 3)).to(self.device)
+        cross_matrix[..., 0, 1] = -gamma[:, -1]
+        cross_matrix[..., 0, 2] = gamma[:, 1]
+        cross_matrix[..., 1, 0] = gamma[:, -1]
+        cross_matrix[..., 1, -1] = -gamma[:, 0]
+        cross_matrix[..., 2, 0] = -gamma[:, 1]
+        cross_matrix[..., 2, 1] = gamma[:, 0]
+
+        rotation = th.zeros((inputs.size()[0], 3, 3)).to(self.device)
+        rotation[:, :, :] = th.eye(3).to(self.device) + (th.sin(theta) * cross_matrix) + ((1 - th.cos(theta)) * (cross_matrix @ cross_matrix))
+
+        radriges_rotation = th.zeros((inputs.size()[0], 3, 3)).to(self.device)
+        radriges_rotation = th.eye(3).to(self.device) + (((1 - th.cos(theta)) / ((theta ** 2) + 1e-5)) * cross_matrix) + (((theta - th.sin(theta)) / ((theta ** 3) + 1e-5)) * (cross_matrix @ cross_matrix))
+
+
+        t_rotated = t.view(t.size()[0], 1, 3) @ radriges_rotation
+        t_rotated = t_rotated.permute(0, 2, 1)
+        
+        T = th.zeros((inputs.size()[0], 4, 4)).to(self.device)
+
+        T[:, :3, :3] = rotation
+        T[:, :3, 3:] = t_rotated
+        
+        return T
+    
+
 
 class Unet(Module):
 
@@ -274,43 +374,151 @@ class DepthNet(Unet):
                 outs.append((depth_out, unc_out))
             
             return tuple(outs)
+        
+
+class SlamD3VO(Module):
+
+    def __init__(
+        self,
+        depthnet_conf: Union[str, dict],
+        posenet_conf: Union[str, dict],
+        warping_conf: Union[str, dict]
+    ) -> None:
+        
+        super().__init__()
+        self._depth_estimator_ = DepthNet(**depthnet_conf)
+        self._pose_estimator_ = PoseNet(**posenet_conf)
+        self._warping_layer_ = STNet(**warping_conf)
+
+        self._predict_tuple_ = namedtuple("SlamVOPredictTuple", [
+            "depth",
+            "uncertanty",
+            "odometry",
+        ])
+        self._output_tuple_ = namedtuple("SlamVOOutTuple", [
+            "image_tprev",
+            "image_tnext"
+        ])
+
     
+    def predict(self, inputs: th.Tensor):
+
+        with th.no_grad():
+            depth, unc = self._depth_estimator_(
+                inputs,
+                out_depth=2
+            )
+            T = self._pose_estimator_(inputs)
+            return self._predict_tuple_(
+                depth=depth,
+                uncertanty=unc,
+                odometry=T
+            )
+        
+
+    def __call__(
+        self, 
+        inputs: Tuple, 
+        depth_level: int=None
+    ) -> NamedTuple:
+
+        depth_prev, _ = self._depth_estimator_(
+            inputs[0],
+            out_depth=depth_level
+        )
+        depth_next, _ = self._depth_estimator_(
+            inputs[1],
+            out_depth=depth_level
+        )
+
+        if depth_level is not None:
+            T_prev = self._pose_estimator_(inputs[0])
+            T_next = self._pose_estimator_(inputs[1])
+            
+            prev_warping = self._warping_layer_(
+                depth_map=depth_prev.permute(0, 2, 3, 1),
+                transforms=T_prev,
+                image=inputs[0]
+            )
+            next_warping = self._warping_layer_(
+                depth_map=depth_next.permute(0, 2, 3, 1),
+                transforms=T_next,
+                image=inputs[1]
+            )
+
+            return self._output_tuple_(
+                image_tprev=prev_warping,
+                image_tnext=next_warping
+            )
+
+            
+
+            
+        
 
 if __name__ ==  "__main__":
     
     test = th.normal(0.0, 1.0, (10, 3, 128, 128))
-    depthnet = DepthNet(
-        in_channels=3,
-        out_channels=1,
-        pyramid_depth=3,
-        hiden_activation="relu",
-        hiden_channels=32,
-        out_activation="relu",
-        dp_unet=0.45,
-        dp_depth=0.45,
-        dp_unc=0.34,
-        depth_activation="sigmoid",
-        unc_actuvation="sigmoid" 
-    )
-    
-    outs = depthnet(test, out_depth=3)
-    print(outs[0].size(), outs[1].size())
-    # for out in outs:
-    #     print(out[0].size(), out[1].size())
 
-    # unet = Unet(
-    #     in_channels=3,
-    #     out_channels=1,
-    #     dp_rate=0.45,
-    #     pyramid_depth=3,
-    #     hiden_activation="relu",
-    #     hiden_channels=32,
-    #     out_activation="relu"
-    # )
+
+    pose_config = {
+        "in_channels": 3,
+        "hiden_channels": 32,
+        "kernel_size": (3, 3),
+        "padding": 1,
+        "stride": 1,
+        "activation": "relu",
+        "dp_rate": 0.0,
+        "normalize_conv": False,
+        "normalize_linear": False,
+        "embedding_dim": 32,
+        "device": "cpu",
+        "twist_out": False
+    }
+
+    depth_config = {
+        "in_channels": 3,
+        "out_channels": 1,
+        "pyramid_depth": 3,
+        "hiden_activation": "relu",
+        "hiden_channels": 32,
+        "out_activation": "relu",
+        "dp_unet": 0.45,
+        "dp_depth": 0.45,
+        "dp_unc": 0.34,
+        "depth_activation": "sigmoid",
+        "unc_actuvation": "softmax" 
+    }
+    waripng_conf = {
+        "camera_matrix": [
+            [100,   0, 63.5],
+            [  0, 100, 63.5],
+            [  0,   0,    1]
+        ],
+        "grid_size": (128, 128)
+    }
+
+    slam_vo_model = SlamD3VO(
+        depthnet_conf=depth_config,
+        posenet_conf=pose_config,
+        warping_conf=waripng_conf
+    ) 
+
+    test_img = th.normal(0, 1, (1, 3, 128, 128))
+    inputs_images = namedtuple("ImageInput", [
+        "key",
+        "left",
+        "right"
+    ])
+    images = inputs_images(
+        key=th.normal(0, 1, (1, 3, 128, 128)),
+        left=th.normal(0, 1, (1, 3, 128, 128)),
+        right=th.normal(0, 1, (1, 3, 128, 128))
+    )
+    out = slam_vo_model(images, depth_level=2)
+    print(out.image_tprev.size(), out.image_tnext.size())
     
-    # outs = unet(test)
-    # for out in outs:
-    #     print(out.size())
+   
     
     
     

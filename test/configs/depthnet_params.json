@@ -1,0 +1,13 @@
+{
+    "in_channels": 3,
+    "out_channels": 1,
+    "pyramid_depth": 3,
+    "hiden_activation": "relu",
+    "hiden_channels": 32,
+    "out_activation": "relu",
+    "dp_unet": 0.45,
+    "dp_depth": 0.45,
+    "dp_unc": 0.34,
+    "depth_activation": "sigmoid",
+    "unc_actuvation": "softmax" 
+}

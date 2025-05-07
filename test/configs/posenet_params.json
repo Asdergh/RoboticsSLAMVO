@@ -1,0 +1,14 @@
+{
+    "in_channels": 3,
+    "hiden_channels": 32,
+    "kernel_size": [3, 3],
+    "padding": 1,
+    "stride": 1,
+    "activation": "relu",
+    "dp_rate": 0.0,
+    "normalize_conv": false,
+    "normalize_linear": false,
+    "embedding_dim": 32,
+    "device": "cpu",
+    "twist_out": false
+}

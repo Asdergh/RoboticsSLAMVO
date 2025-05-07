@@ -102,10 +102,9 @@ def ab_loss(a_tensor: Tensor, b: Tensor):
 
 
 def ssim(
-    I1: Tensor, 
-    I2: Tensor,
+    I1: th.Tensor, 
+    I2: th.Tensor,
     kernel_size: Union[Tuple[int, int], int], 
-    kernel_type: str="gauss",
     in_channels: int=3,
     C1: float=0.01**2, 
     C2: float=0.03**2,
@@ -114,19 +113,39 @@ def ssim(
 
 
     
-    kernel = _kernels_[kernel_type](size=kernel_size).view(1, 1, kernel_size[0], kernel_size[1])
+    kernel = gauss_kernel(size=kernel_size).view(1, 1, kernel_size[0], kernel_size[1])
     kernel = kernel.repeat(1, in_channels, 1, 1)
-    print(kernel.size())
-    mu_x = F.conv2d(I1, kernel, padding=kernel.size(-1)//2)
-    mu_y = F.conv2d(I2, kernel, padding=kernel.size(-1)//2)
+
+    mu_x = F.conv2d(
+        input=I1, 
+        weight=kernel, 
+        stride=kernel.size(-1)//2
+    )
+    mu_y = F.conv2d(
+        input=I2, 
+        weight=kernel, 
+        stride=kernel.size(-1)//2
+    )
 
     mu_x_sq = mu_x.pow(2)
     mu_y_sq = mu_y.pow(2)
     mu_xy = mu_x * mu_y
 
-    sigma_x_sq = F.conv2d(I1*I1, kernel, padding=kernel.size(-1)//2) - mu_x_sq
-    sigma_y_sq = F.conv2d(I2*I2, kernel, padding=kernel.size(-1)//2) - mu_y_sq
-    sigma_xy = F.conv2d(I1*I2, kernel, padding=kernel.size(-1)//2) - mu_xy
+    sigma_x_sq = F.conv2d(
+        input=I1*I1, 
+        weight=kernel, 
+        stride=kernel.size(-1)//2
+    ) - mu_x_sq
+    sigma_y_sq = F.conv2d(
+        input=I2*I2, 
+        weight=kernel, 
+        stride=kernel.size(-1)//2
+    ) - mu_y_sq
+    sigma_xy = F.conv2d(
+        input=I1*I2, 
+        weight=kernel, 
+        stride=kernel.size(-1)//2
+    ) - mu_xy
 
 
     numerator = (2*mu_xy + C1) * (2*sigma_xy + C2)
@@ -158,7 +177,7 @@ if __name__ == "__main__":
     kernel_size = (11, 11)
     I1 = th.normal(0.0, 1.0, (10, 3, 128, 128))
     I2 = th.normal(0.0, 1.0, (10, 3, 128, 128))
-    print(ssim(I1, I2, kernel_size=kernel_size, return_map=False))
+    print(ssim(I1, I2, kernel_size=kernel_size, return_map=True))
     
     
     
