@@ -51,8 +51,11 @@ class SLAMSterioKITILoader:
 
         trajectory_path = os.path.join(path, "groundtruth.txt")
         trajectory = np.loadtxt(trajectory_path)
-        self._translations_ = trajectory[:, 1:4]
-        self._rotations_ = trajectory[:, 4:]
+        self._translations_ = trajectory[0::15, 1:4]
+        self._rotations_ = trajectory[0::15, 4:]
+        print(trajectory.shape, len(self._images_), len(self._depths_))
+        self._prev_rotation_ = np.zeros(4)
+        self._prev_trnaslation_ = np.zeros(3)
     
     
     def __iter__(self):
@@ -66,6 +69,10 @@ class SLAMSterioKITILoader:
             
             if idx == self._samples_n_:
                 break
+
+            dis_tf = translation - self._prev_trnaslation_
+            dis_rot = rotation - self._prev_rotation_
+
             image = (self._res_(read_image(image)).permute(1, 2, 0) / 255.0).numpy()
             depth = (self._res_(read_image(depth)).permute(1, 2, 0) / 255.0).numpy()
             if self.out_tensors == "np":
@@ -80,7 +87,9 @@ class SLAMSterioKITILoader:
                 w=self.w,
                 h=self.h
             )
-        
+            self._prev_rotation_ = rotation
+            self._prev_trnaslation_ = translation
+
 
 
 

@@ -20,17 +20,16 @@ class Simulator:
     def log_camera(self, sample: NamedTuple) -> None:
         
         if hasattr(sample, "rotation"):
-            quat = sample.rotation * 1e+2
+            quat = sample.rotation
             rotation = R.from_quat(quat).as_matrix()
 
         rr.log(
             f"{self._origin_}/camera",
             rr.Transform3D(
                 mat3x3=rotation,
-                translation=(sample.translation * 1e-2)
+                translation=(sample.translation)
             )
         )
-        print(rotation, sample.translation)
         rr.log(
             f"{self._origin_}/camera",
             rr.Pinhole(
@@ -71,7 +70,7 @@ if __name__ == "__main__":
     loader = SLAMSterioKITILoader(
         path=path, 
         image_size=(256, 256),
-        samples_n=200
+        samples_n=2000
     )
     sim = Simulator(loader=loader)
         
