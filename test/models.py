@@ -29,7 +29,7 @@ from torch.nn import (
 )
 
 from layers import *
-from test.functions import *
+from utils.functions import *
 from collections import namedtuple
 from typing import NamedTuple
 
@@ -103,10 +103,10 @@ class PoseNet(Module):
         embedding = F.linear(x, weight=embedding_weights.T)
         
         twist = self._linear_(embedding)
+        twist = twist / th.max(twist)
         gamma = twist[:, :3]
         t = twist[:, 3:]
         
-        print(t.size(), gamma.size())
         theta = th.norm(gamma, keepdim=True, dim=-1)
         gamma = gamma / (theta + 1e-5)
         theta = theta.view(theta.size()[0], 1, 1)
@@ -134,6 +134,7 @@ class PoseNet(Module):
         T[:, :3, :3] = rotation
         T[:, :3, 3:] = t_rotated
         
+        # print(T.max(), T.min())
         return T
     
 
@@ -397,7 +398,11 @@ class SlamD3VO(Module):
         ])
         self._output_tuple_ = namedtuple("SlamVOOutTuple", [
             "image_tprev",
-            "image_tnext"
+            "image_tnext",
+            "unc_prev",
+            "unc_next",
+            "depth_prev",
+            "depth_next"
         ])
 
     
@@ -422,11 +427,11 @@ class SlamD3VO(Module):
         depth_level: int=None
     ) -> NamedTuple:
 
-        depth_prev, _ = self._depth_estimator_(
+        depth_prev, unc_prev = self._depth_estimator_(
             inputs[0],
             out_depth=depth_level
         )
-        depth_next, _ = self._depth_estimator_(
+        depth_next, unc_next = self._depth_estimator_(
             inputs[1],
             out_depth=depth_level
         )
@@ -446,9 +451,21 @@ class SlamD3VO(Module):
                 image=inputs[1]
             )
 
+            # print(f"""
+            #     prev_warping: {prev_warping.min()}, {prev_warping.max()},
+            #     next_warping: {next_warping.min()}, {next_warping.max()},
+            #     unc_prev: {unc_prev.min()}, {unc_prev.max()},
+            #     unc_next: {unc_next.min()}, {unc_next.max()},
+            #     depth_prev: {depth_prev.min()}, {depth_prev.max()},
+            #     depth_next: {depth_next.min()}, {depth_next.max()}
+            # """)
             return self._output_tuple_(
                 image_tprev=prev_warping,
-                image_tnext=next_warping
+                image_tnext=next_warping,
+                unc_prev=unc_prev,
+                unc_next=unc_next,
+                depth_prev=depth_prev,
+                depth_next=depth_next
             )
 
             

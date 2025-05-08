@@ -110,8 +110,6 @@ def ssim(
     C2: float=0.03**2,
     return_map: bool=False
 ):
-
-
     
     kernel = gauss_kernel(size=kernel_size).view(1, 1, kernel_size[0], kernel_size[1])
     kernel = kernel.repeat(1, in_channels, 1, 1)

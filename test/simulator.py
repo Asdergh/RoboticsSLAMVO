@@ -2,6 +2,7 @@ import numpy as np
 import os
 import json, yaml
 import rerun as rr
+import torch as th
 
 from scipy.spatial.transform import Rotation as R
 from typing import Generator, Union, Tuple, NamedTuple
@@ -47,6 +48,7 @@ class Simulator:
                 colormap=5
             )
         )
+
     
     def _build_simulation_(self) -> None:
 
@@ -59,7 +61,6 @@ class Simulator:
             ascii="=>-",
             desc="Rendering scene..."
         )):
-            
             rr.set_time("tick", sequence=t + 1)
             self.log_camera(sample)
 
